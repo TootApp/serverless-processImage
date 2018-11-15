@@ -4,7 +4,7 @@ import cv2
 import base64
 import math
 import enchant
-import pytesseract
+import boto3
 
 
 def base64_to_image(b64_str, output='b64_orig_img.png'):
@@ -142,12 +142,24 @@ def reorient_image(theta, orientation, img_name='b64_orig_img.png'):
     cv2.imwrite('b64_reor_img.png', reor_img)
 
 
-def fetch_text(img):
-    """Fetch text from image using tesseract. Uses bias for English.
-    :param img: image to be analyzed """
+def fetch_text(img_name):
+    """Fetch text from image using AWS rekognition.
+    :param img_name: image to be analyzed
+    :return: json of response from rekognition detect_text()"""
 
-    config = '-l eng --oem 1 --psm 3'
-    return pytesseract.image_to_string(img, config=config)
+    with open(img_name, "rb") as image:
+        img_bytes = bytearray(image.read())
+
+    rekognition = boto3.client('rekognition')
+    response = rekognition.detect_text(
+            Image={
+                'Bytes': img_bytes,
+                }
+        )
+
+    text = [box['DetectedText'] for box in response['TextDetections']]
+
+    return text
 
 
 def image_treating(img):
@@ -191,7 +203,7 @@ def sample_orientation(havg, wavg, img_name='b64img.png', dictionary=enchant.Dic
     align_image(img_name)
     rows, cols = image.shape
     word_count = [0, 0, 0, 0]
-    for i, angle in enumerate([0, 90, 180, 270]):
+    for orientation, angle in enumerate([0, 90, 180, 270]):
         M = cv2.getRotationMatrix2D((cols // 2, rows // 2), angle, 1)
         cos = np.abs(M[0, 0])
         sin = np.abs(M[0, 1])
@@ -200,18 +212,17 @@ def sample_orientation(havg, wavg, img_name='b64img.png', dictionary=enchant.Dic
         M[0, 2] += (width / 2) - cols // 2
         M[1, 2] += (height / 2) - rows // 2
         tmp_image = cv2.warpAffine(image, M, (width, height))
-        cv2.imwrite(f'sample_orientation{i}.png', tmp_image)
-        text = fetch_text(tmp_image)
+        cv2.imwrite(f'sample_orientation{orientation}.png', tmp_image)
+        text = fetch_text(f'sample_orientation{orientation}.png')
 
-        for word in text.split():
-            if dictionary.check(word) and len(word) > 2:
-                print(i, word)
-                word_count[i] += 1
+        for i, word in enumerate(text):
+            if dictionary.check(word) and len(word) > 2 and word.isalnum():
+                word_count[orientation] += 1
 
     max_word_count = word_count.index(max(word_count))
     """When havg is larger than wavg, most likely we are looking at a tilted reference, so we should exclude this one, 
     as well as the 180 degree rotation of it."""
-    if havg > wavg and max_word_count == 0:
+    if havg > wavg and max_word_count % 2 is 0:
         word_count[0] = -1
         word_count[2] = -1  # This is the 180 degree rotation of the max count, so it should also be discarded
 
@@ -246,4 +257,3 @@ def rotate_image(b64str):
     remove_temp()
 
     return b64output
-

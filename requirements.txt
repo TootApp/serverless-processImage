@@ -1,4 +1,4 @@
 numpy
-pytesseract
+boto3
 pyenchant
 opencv-python
