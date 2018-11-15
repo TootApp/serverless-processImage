@@ -7,22 +7,33 @@ import enchant
 import boto3
 
 
-def base64_to_image(b64_str, output='b64_orig_img.png'):
-    """"Decodes a base64 str. To be used for generating images to be parsed
-    :param b64_str: base64 string
-    :param output: file name string"""
+def base64_to_image_old(b64_str, output='b64_orig_img.png'):
+
 
     img_data = base64.b64decode(b64_str)
     with open(output, 'wb') as f:
         f.write(img_data)
 
 
-def image_to_base64(img_name):
+def base64_to_image(b64_str):
+    """"Decodes a base64 str. To be used for generating images to be parsed
+    :param b64_str: base64 string"""
+    img = base64.b64decode(b64_str)
+    img_array = np.fromstring(img, np.uint8)
+    return cv2.imdecode(img_array, 1)
+
+
+def image_to_base64(image):
     """"Encodes an image to base64 string format
-    :param img_name: image file to be encoded"""
-    with open(img_name, "rb") as f:
-        data = f.read()
-    return base64.b64encode(data)
+    :param image: image object to be encoded"""
+    _, buffer = cv2.imencode('.png', image)
+    return base64.b64encode(buffer)
+
+
+def image_to_bytes(image):
+    """Converts an image object to a byte array
+    :param image: image object"""
+    return cv2.imencode('.png', image)[1].tostring()
 
 
 def threshinv(image):
@@ -106,29 +117,26 @@ def total(img_to_proc):
     return output, thetaavg, havg, wavg
 
 
-def align_image(img_name, output='b64img.png'):
+def align_image(image):
     """Reads the file path of the image to be rotated to an either horizontal or vertical orientation. It writes
     an image in gray scale, to be parsed later with tesseract. Function returns average height and width of
     bounding boxes to help estimate whether image is turned 90 degrees. To define the correct orientation, see
     reorient_image()
-    :param img_name: image path
-    :param output: output path
-    :return: angle of rotation, average height and width of all the bounding boxes"""
+    :param image: image object"""
 
-    image = cv2.imread(img_name, 0)
-    img1, angle, havg, wavg = total(image)
-    cv2.imwrite(output, img1)
-    return angle, havg, wavg
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    img_gray, angle, havg, wavg = total(image)
+
+    return img_gray, angle, havg, wavg
 
 
-def reorient_image(theta, orientation, img_name='b64_orig_img.png'):
+def reorient_image(image, theta, orientation):
     """Reorients the original image in the direction the module believes to be the most accurate one.
     :param theta: angle in degrees for rotation, float
     :param orientation: integer identifying how many 90 degrees turns the image has to be rotated. See
                         sample_orientation()
-    :param img_name: image to be rotated"""
+    :param image: image to be rotated"""
 
-    image = cv2.imread(img_name, cv2.IMREAD_COLOR)
     rows, cols, _ = image.shape
     angle = theta - orientation * 90
     M = cv2.getRotationMatrix2D((cols // 2, rows // 2), -angle, 1)
@@ -139,16 +147,14 @@ def reorient_image(theta, orientation, img_name='b64_orig_img.png'):
     M[0, 2] += (width / 2) - cols // 2
     M[1, 2] += (height / 2) - rows // 2
     reor_img = cv2.warpAffine(image, M, (width, height))
-    cv2.imwrite('b64_reor_img.png', reor_img)
+
+    return reor_img
 
 
-def fetch_text(img_name):
+def fetch_text(img_bytes): # img_name):
     """Fetch text from image using AWS rekognition.
-    :param img_name: image to be analyzed
+    :param img_bytes: byte array encoding an image
     :return: json of response from rekognition detect_text()"""
-
-    with open(img_name, "rb") as image:
-        img_bytes = bytearray(image.read())
 
     rekognition = boto3.client('rekognition')
     response = rekognition.detect_text(
@@ -186,22 +192,20 @@ def remove_temp():
         os.remove(file)
 
 
-def sample_orientation(havg, wavg, img_name='b64img.png', dictionary=enchant.Dict("en_US")):
+def sample_orientation(img_gray, havg, wavg, dictionary=enchant.Dict("en_US")):
     """Inspect the four possible orientations for an aligned image. Text is extracted with fetch_text(). Images in
     the wrong direction will tend to result in random text, whereas for images correctly oriented will result in
     proper text. This function will count how many words are in a dictionary, and this will be used to decide
     the correct orientation. The code will also look into the bounding box dimensions, to be able to capture cases
     where the code mistakenly chooses a 90 degree rotated image
+    :param img_gray: image object in gray scale
     :param havg: average height of bounding boxes
     :param wavg: average width of bounding boxes
-    :param img_name: image to be analyzed
     :param dictionary: dictionary to be used for word counting
     :return: int number corresponding to the number of 90 degree rotations to be performed from the input image"""
 
-    image = image_treating(cv2.imread(img_name, 0))
-    cv2.imwrite(img_name, image)
-    align_image(img_name)
-    rows, cols = image.shape
+    img_gray = image_treating(img_gray)
+    rows, cols = img_gray.shape
     word_count = [0, 0, 0, 0]
     for orientation, angle in enumerate([0, 90, 180, 270]):
         M = cv2.getRotationMatrix2D((cols // 2, rows // 2), angle, 1)
@@ -211,9 +215,9 @@ def sample_orientation(havg, wavg, img_name='b64img.png', dictionary=enchant.Dic
         height = int((rows * cos) + (cols * sin))
         M[0, 2] += (width / 2) - cols // 2
         M[1, 2] += (height / 2) - rows // 2
-        tmp_image = cv2.warpAffine(image, M, (width, height))
-        cv2.imwrite(f'sample_orientation{orientation}.png', tmp_image)
-        text = fetch_text(f'sample_orientation{orientation}.png')
+        tmp_image = cv2.warpAffine(img_gray, M, (width, height))
+        img_bytes = image_to_bytes(tmp_image)
+        text = fetch_text(img_bytes)
 
         for i, word in enumerate(text):
             if dictionary.check(word) and len(word) > 2 and word.isalnum():
@@ -235,12 +239,12 @@ def sample_orientation(havg, wavg, img_name='b64img.png', dictionary=enchant.Dic
     return max_word_count
 
 
-def preprocess_image(image_name="b64_orig_img.png"):
+def preprocess_image(image):
     """Preprocesses image in colors to remove noise from it.
-    :param image_name: image file (image converted from base64 str by default)"""
+    :param image object
+    :return: image object after color filtering"""
 
-    img_in = cv2.imread(image_name)
-    cv2.imwrite('b64img.png', cv2.fastNlMeansDenoisingColored(img_in, None, 10, 10, 7, 21))
+    return cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
 
 
 def rotate_image(b64str):
@@ -248,12 +252,11 @@ def rotate_image(b64str):
     :param b64str: base64 string of image
     :return: b64st of encoded rotated image"""
 
-    base64_to_image(b64str)
-    preprocess_image(image_name="b64_orig_img.png")
-    angle, havg, wavg = align_image('b64img.png')
-    orientation = sample_orientation(havg, wavg)
-    reorient_image(angle, orientation, 'b64_orig_img.png')
-    b64output = image_to_base64('b64_reor_img.png')
-    remove_temp()
+    image = base64_to_image(b64str)
+    image = preprocess_image(image)
+    img_gray, angle, havg, wavg = align_image(image)
+    orientation = sample_orientation(img_gray, havg, wavg)
+    output = reorient_image(image, angle, orientation)
+    b64output = image_to_base64(output)
 
     return b64output
