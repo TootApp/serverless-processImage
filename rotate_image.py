@@ -8,8 +8,6 @@ import boto3
 
 
 def base64_to_image_old(b64_str, output='b64_orig_img.png'):
-
-
     img_data = base64.b64decode(b64_str)
     with open(output, 'wb') as f:
         f.write(img_data)
@@ -21,6 +19,14 @@ def base64_to_image(b64_str):
     img = base64.b64decode(b64_str)
     img_array = np.fromstring(img, np.uint8)
     return cv2.imdecode(img_array, 1)
+
+
+def image_to_base64_old(img_name):
+    """"Encodes an image to base64 string format
+    :param img_name: image file to be encoded"""
+    with open(img_name, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data)
 
 
 def image_to_base64(image):
@@ -71,40 +77,25 @@ def clhe(image):
     return cl1
 
 
-def total(img_to_proc):
+def straighten_image(img_to_proc, areas, angles):
     # thresholding and inversion of image for further processing.
     # handy for contour extraction
-    img = img_to_proc
-    temp = dilation(threshinv(clhe(img_to_proc)))
-    _, contours, hierarchy = cv2.findContours(temp, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    havg = 0
-    wavg = 0
-    wordsctr = 0
     total_area = 0
     thetaavg = 0
 
-    for cnt in contours:
-        a = img.size / cv2.contourArea(cnt)
-
-        if 30 < a < 3000:
-            x, y, w, h = cv2.boundingRect(cnt)
-            wordsctr = wordsctr + 1
-            rect = cv2.minAreaRect(cnt)
+    for i, area in enumerate(areas):
             # correction will be of no more than 45 degrees. Final orientation is assessed with reorient_image()
-            if (rect[2]) < -45:
-                thetaavg = thetaavg + (90 + rect[2]) * a
-            elif (rect[2]) > 45:
-                thetaavg = thetaavg - (90 + rect[2]) * a
-            else:
-                thetaavg = thetaavg + rect[2] * a
-            total_area = total_area + a
-            havg = havg + h
-            wavg = wavg + w
-    havg = havg / wordsctr
-    wavg = wavg / wordsctr
-    thetaavg = thetaavg / wordsctr / total_area
-    rows, cols = img_to_proc.shape
+        if (angles[i]) < -45:
+            thetaavg = thetaavg + (90 + angles[i]) * area
+        elif (angles[i]) > 45:
+            thetaavg = thetaavg - (90 + angles[i]) * area
+        else:
+            thetaavg = thetaavg + angles[i] * area
+        total_area = total_area + area
+
+    thetaavg = thetaavg / len(angles) / total_area
+    rows, cols, _ = img_to_proc.shape
     M = cv2.getRotationMatrix2D((cols // 2, rows // 2), thetaavg, 1)
     cos = np.abs(M[0, 0])
     sin = np.abs(M[0, 1])
@@ -113,8 +104,8 @@ def total(img_to_proc):
     M[0, 2] += (width / 2) - cols // 2
     M[1, 2] += (height / 2) - rows // 2
     output = cv2.warpAffine(img_to_proc, M, (width, height))
-    cv2.fastNlMeansDenoising(output, output, h=3, templateWindowSize=7, searchWindowSize=21)
-    return output, thetaavg, havg, wavg
+    #cv2.fastNlMeansDenoising(output, output, h=3, templateWindowSize=7, searchWindowSize=21)
+    return output, thetaavg
 
 
 def align_image(image):
@@ -124,10 +115,11 @@ def align_image(image):
     reorient_image()
     :param image: image object"""
 
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    img_gray, angle, havg, wavg = total(image)
+#    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    return img_gray, angle, havg, wavg
+    _, areas, angles = fetch_text(image_to_bytes(image))
+    output, theta = straighten_image(image, areas, angles)
+    return output, theta
 
 
 def reorient_image(image, theta, orientation):
@@ -163,9 +155,54 @@ def fetch_text(img_bytes): # img_name):
                 }
         )
 
-    text = [box['DetectedText'] for box in response['TextDetections']]
+    text = []
+    widths = []
+    heights = []
+    areas = []
+    angles = []
 
-    return text
+    for box in response['TextDetections']:
+        if box['Confidence'] > 90:
+            text.append(box['DetectedText'])
+            widths.append(box['Geometry']['BoundingBox']['Width'])
+            heights.append(box['Geometry']['BoundingBox']['Height'])
+            areas.append(widths[-1] * heights[-1])
+            pointA = box['Geometry']['Polygon'][0]
+            pointB = box['Geometry']['Polygon'][1]
+            pointC = box['Geometry']['Polygon'][2]
+            AB = math.sqrt(pow(pointB['X'] - pointA['X'], 2) + pow(pointB['Y'] - pointA['Y'], 2))
+            BC = math.sqrt(pow(pointB['X'] - pointC['X'], 2) + pow(pointB['Y'] - pointC['Y'], 2))
+
+            if np.abs(heights[-1]) <= np.abs(widths[-1]):
+                # Box larger in width
+                if AB <= BC:
+                    # BC is our width
+                    angles.append(180 * math.atan2(pointB['Y'] - pointC['Y'], pointB['X'] - pointC['X'])/np.pi)
+                else:
+                    # AB is our width
+                    angles.append(180 * math.atan2(pointB['Y'] - pointA['Y'], pointB['X'] - pointA['X'])/np.pi)
+
+            else:
+                """Tall box. It's possible to get single numbers, such as 1, which is tall and thin. Need to account 
+                for this"""
+                if len(text[-1]) < 2:
+                    # Single tall and thin character case
+                    if AB > BC:
+                        # CD is our width
+                        angles.append(180 * math.atan2(pointB['Y'] - pointC['Y'], pointB['X'] - pointC['X']) / np.pi)
+                    else:
+                        # AB is our width
+                        angles.append(180 * math.atan2(pointB['Y'] - pointA['Y'], pointB['X'] - pointA['X']) / np.pi)
+
+                else:
+                    if AB <= BC:
+                        # CD is our height
+                        angles.append(180 * math.atan2(pointB['Y'] - pointC['Y'], pointB['X'] - pointC['X']) / np.pi)
+                    else:
+                        # AB is our height
+                        angles.append(180 * math.atan2(pointB['Y'] - pointA['Y'], pointB['X'] - pointA['X']) / np.pi)
+
+    return text, areas, angles
 
 
 def image_treating(img):
@@ -182,17 +219,7 @@ def image_treating(img):
     return cv2.filter2D(img, -1, kernel)
 
 
-def remove_temp():
-    """Deletes all the files generated when using this module."""
-
-    file_list = ['b64img.png', 'b64_orig_img.png', 'b64_reor_img.png']
-    file_list.extend([f'sample_orientation{i}.png' for i in range(4)])
-
-    for file in file_list:
-        os.remove(file)
-
-
-def sample_orientation(img_gray, havg, wavg, dictionary=enchant.Dict("en_US")):
+def sample_orientation(image, dictionary=enchant.Dict("en_US")):
     """Inspect the four possible orientations for an aligned image. Text is extracted with fetch_text(). Images in
     the wrong direction will tend to result in random text, whereas for images correctly oriented will result in
     proper text. This function will count how many words are in a dictionary, and this will be used to decide
@@ -204,8 +231,8 @@ def sample_orientation(img_gray, havg, wavg, dictionary=enchant.Dict("en_US")):
     :param dictionary: dictionary to be used for word counting
     :return: int number corresponding to the number of 90 degree rotations to be performed from the input image"""
 
-    img_gray = image_treating(img_gray)
-    rows, cols = img_gray.shape
+    # img_gray = image_treating(img_gray)
+    rows, cols, _ = image.shape
     word_count = [0, 0, 0, 0]
     for orientation, angle in enumerate([0, 90, 180, 270]):
         M = cv2.getRotationMatrix2D((cols // 2, rows // 2), angle, 1)
@@ -215,28 +242,31 @@ def sample_orientation(img_gray, havg, wavg, dictionary=enchant.Dict("en_US")):
         height = int((rows * cos) + (cols * sin))
         M[0, 2] += (width / 2) - cols // 2
         M[1, 2] += (height / 2) - rows // 2
-        tmp_image = cv2.warpAffine(img_gray, M, (width, height))
+        tmp_image = cv2.warpAffine(image, M, (width, height))
         img_bytes = image_to_bytes(tmp_image)
-        text = fetch_text(img_bytes)
+        text, areas, angles = fetch_text(img_bytes)
 
-        for i, word in enumerate(text):
-            if dictionary.check(word) and len(word) > 2 and word.isalnum():
-                word_count[orientation] += 1
+        if len(text) == 0:
+            continue
 
-    max_word_count = word_count.index(max(word_count))
-    """When havg is larger than wavg, most likely we are looking at a tilted reference, so we should exclude this one, 
-    as well as the 180 degree rotation of it."""
-    if havg > wavg and max_word_count % 2 is 0:
-        word_count[0] = -1
-        word_count[2] = -1  # This is the 180 degree rotation of the max count, so it should also be discarded
+        """Cutting out images with too much vertical text from the beginning"""
+        if np.abs(np.average(angles, weights=areas)) > 45:
+            word_count[orientation] = -1
+            continue
 
-    elif havg < wavg and max_word_count % 2 is not 0:
-        word_count[3] = -1
-        word_count[1] = -1
+        else:
+            for i, word in enumerate(text):
+                if dictionary.check(word) and np.abs(angles[i]) < 45 and word.isalnum():
+                    word_count[orientation] += 1
 
-    max_word_count = word_count.index(max(word_count))
+        """Particularly for equations as text, it can be tricky. We thus need to rely on counting of boxes only"""
 
-    return max_word_count
+        if max(word_count) == 0:
+            for i, word in enumerate(text):
+                if np.abs(angles[i]) < 45:
+                    word_count[orientation] += 1
+
+    return word_count.index(max(word_count))
 
 
 def preprocess_image(image):
@@ -254,8 +284,8 @@ def rotate_image(b64str):
 
     image = base64_to_image(b64str)
     image = preprocess_image(image)
-    img_gray, angle, havg, wavg = align_image(image)
-    orientation = sample_orientation(img_gray, havg, wavg)
+    image, angle = align_image(image)
+    orientation = sample_orientation(image)
     output = reorient_image(image, angle, orientation)
     b64output = image_to_base64(output)
 
